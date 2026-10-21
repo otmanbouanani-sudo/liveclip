@@ -34,7 +34,7 @@ h1 span{color:var(--accent)}
 .pair{padding:18px;display:flex;flex-direction:column;gap:14px}
 .pair h2{margin:0;font-size:1.1rem}
 .pair p{margin:0;color:var(--muted);line-height:1.5}
-.row{display:flex;gap:8px;flex-wrap:wrap}
+.row{display:flex;gap:8px}
 input{font:600 1.25rem var(--f-mono);letter-spacing:.2em;text-transform:uppercase;padding:12px 14px;
   border-radius:11px;border:1px solid var(--line);background:var(--bg);color:var(--ink);flex:1;min-width:0;width:100%}
 input:focus{outline:2px solid var(--accent);outline-offset:1px}
@@ -48,7 +48,7 @@ input:focus{outline:2px solid var(--accent);outline-offset:1px}
 .pairinfo .grow{flex:1;min-width:150px}
 
 .slip{flex:1;min-height:160px;display:flex;flex-direction:column;overflow:hidden}
-.slip-head{display:flex;justify-content:space-between;padding:9px 14px;border-bottom:1px dashed var(--line);
+.slip-head{display:flex;justify-content:space-between;gap:10px;padding:9px 14px;border-bottom:1px dashed var(--line);
   font:.74rem var(--f-mono);color:var(--muted)}
 textarea{flex:1;width:100%;resize:none;border:0;outline:0;background:transparent;color:var(--ink);
   font:15px/1.55 var(--f-mono);padding:14px}
@@ -62,6 +62,7 @@ button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 button.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
 button.armed{border-color:var(--warn);color:var(--warn)}
 button.link{background:none;border:0;color:var(--muted);text-decoration:underline;min-height:0;padding:4px;font-weight:500;font-size:.82rem}
+.relays{font:.72rem var(--f-mono);color:var(--muted);text-align:center;margin:0}
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(80px + env(safe-area-inset-bottom));
   background:var(--ink);color:var(--paper);padding:9px 16px;border-radius:999px;font-weight:600;font-size:.88rem;pointer-events:none}
 [hidden]{display:none!important}
@@ -74,19 +75,17 @@ button.link{background:none;border:0;color:var(--muted);text-decoration:underlin
     <div class="status" id="status" data-s="off"><span class="dot"></span><span id="statusText">Not paired</span></div>
   </header>
 
-  <!-- Pairing screen -->
   <section class="card pair" id="pairView">
     <h2>Pair your devices</h2>
     <p>Create a code on your computer, then scan the QR code with your phone (or type the same code on it).</p>
     <button class="primary" id="newBtn" type="button">Create a new code</button>
     <div class="or">or join with a code</div>
     <form class="row" id="joinForm">
-      <input id="codeInput" maxlength="8" autocomplete="off" autocapitalize="characters" placeholder="ABC123" aria-label="Pairing code">
+      <input id="codeInput" maxlength="12" autocomplete="off" autocapitalize="characters" placeholder="ABC123" aria-label="Pairing code">
       <button type="submit">Join</button>
     </form>
   </section>
 
-  <!-- Clipboard screen -->
   <section class="card pairinfo" id="infoView" hidden>
     <div id="qr" hidden></div>
     <div class="grow">
@@ -98,7 +97,7 @@ button.link{background:none;border:0;color:var(--muted);text-decoration:underlin
   </section>
 
   <section class="card slip" id="slipView" hidden>
-    <div class="slip-head"><span id="peerInfo">No device connected</span><span><b id="count">0</b> chars</span></div>
+    <div class="slip-head"><span id="peerInfo">Other device not seen yet</span><span><b id="count">0</b> chars</span></div>
     <textarea id="clip" spellcheck="false" autocomplete="off"
       placeholder="Type or paste here — it appears live on your other device."></textarea>
   </section>
@@ -108,55 +107,255 @@ button.link{background:none;border:0;color:var(--muted);text-decoration:underlin
     <button id="selectBtn" type="button">Select all</button>
     <button id="clearBtn" type="button">Clear</button>
   </div>
+  <p class="relays" id="relays" hidden></p>
   <div class="toast" id="toast" hidden></div>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script>
+/* ===== Minimal MQTT 3.1.1 client over WebSocket (QoS 0) ===== */
+class MiniMqtt {
+  constructor(url, onMessage, onState){
+    this.url = url; this.onMessage = onMessage; this.onState = onState || (()=>{});
+    this.subs = new Set(); this.ws = null; this.ok = false; this.stopped = false;
+    this.buf = new Uint8Array(0); this.pid = 1; this.retry = 2000; this.timer = null; this.ping = null;
+  }
+  static str(s){ const b = new TextEncoder().encode(s); return MiniMqtt.cat([new Uint8Array([b.length>>8, b.length&255]), b]); }
+  static cat(parts){ let n=0; parts.forEach(p=>n+=p.length); const o=new Uint8Array(n); let i=0; parts.forEach(p=>{o.set(p,i);i+=p.length;}); return o; }
+  static len(n){ const o=[]; do{ let d=n%128; n=Math.floor(n/128); if(n>0) d|=128; o.push(d);}while(n>0); return new Uint8Array(o); }
+  static pkt(type, body){ return MiniMqtt.cat([new Uint8Array([type]), MiniMqtt.len(body.length), body]); }
+  start(){ this.stopped = false; this.open(); }
+  stop(){ this.stopped = true; clearTimeout(this.timer); clearInterval(this.ping); try{ this.ws && this.ws.close(); }catch(_){} this.setOk(false); }
+  setOk(v){ if (this.ok !== v){ this.ok = v; this.onState(v); } }
+  open(){
+    if (this.stopped) return;
+    let ws;
+    try{ ws = new WebSocket(this.url, ['mqtt']); }catch(_){ return this.again(); }
+    this.ws = ws; ws.binaryType = 'arraybuffer'; this.buf = new Uint8Array(0);
+    const guard = setTimeout(() => { if (!this.ok) try{ ws.close(); }catch(_){} }, 10000);
+    ws.onopen = () => {
+      const id = 'lc' + Math.random().toString(36).slice(2, 12);
+      const body = MiniMqtt.cat([MiniMqtt.str('MQTT'), new Uint8Array([4, 2, 0, 60]), MiniMqtt.str(id)]);
+      ws.send(MiniMqtt.pkt(0x10, body));
+    };
+    ws.onmessage = ev => { this.buf = MiniMqtt.cat([this.buf, new Uint8Array(ev.data)]); this.parse(); };
+    ws.onclose = ws.onerror = () => {
+      clearTimeout(guard); clearInterval(this.ping);
+      if (this.ws === ws){ this.ws = null; this.setOk(false); this.again(); }
+    };
+  }
+  again(){ if (this.stopped) return; clearTimeout(this.timer); this.timer = setTimeout(() => this.open(), this.retry); this.retry = Math.min(this.retry * 1.6, 30000); }
+  parse(){
+    while (this.buf.length >= 2){
+      let mul=1, len=0, i=1, b;
+      do{ if (i >= this.buf.length) return; b = this.buf[i++]; len += (b & 127) * mul; mul *= 128; } while (b & 128);
+      if (this.buf.length < i + len) return;
+      const head = this.buf[0], body = this.buf.subarray(i, i + len);
+      this.buf = this.buf.slice(i + len);
+      this.handle(head, body);
+    }
+  }
+  handle(head, body){
+    const type = head >> 4;
+    if (type === 2){ // CONNACK
+      if (body[1] !== 0){ try{ this.ws.close(); }catch(_){} return; }
+      this.retry = 2000; this.setOk(true);
+      this.subs.forEach(t => this.sendSub(t));
+      clearInterval(this.ping);
+      this.ping = setInterval(() => this.raw(new Uint8Array([0xC0, 0])), 30000);
+    } else if (type === 3){ // PUBLISH
+      const qos = (head >> 1) & 3;
+      const tl = (body[0] << 8) | body[1];
+      const topic = new TextDecoder().decode(body.subarray(2, 2 + tl));
+      let p = 2 + tl;
+      if (qos > 0){ const id = body.subarray(p, p + 2); p += 2; if (qos === 1) this.raw(MiniMqtt.pkt(0x40, id)); }
+      try{ this.onMessage(topic, new TextDecoder().decode(body.subarray(p))); }catch(e){ console.error(e); }
+    }
+  }
+  raw(bytes){ if (this.ws && this.ws.readyState === 1) this.ws.send(bytes); }
+  sendSub(topic){
+    const id = this.pid = (this.pid % 65535) + 1;
+    this.raw(MiniMqtt.pkt(0x82, MiniMqtt.cat([new Uint8Array([id >> 8, id & 255]), MiniMqtt.str(topic), new Uint8Array([0])])));
+  }
+  subscribe(topic){ this.subs.add(topic); if (this.ok) this.sendSub(topic); }
+  publish(topic, text, retain){
+    if (!this.ok) return false;
+    this.raw(MiniMqtt.pkt(0x30 | (retain ? 1 : 0), MiniMqtt.cat([MiniMqtt.str(topic), new TextEncoder().encode(text)])));
+    return true;
+  }
+}
+
+/* ===== ntfy.sh relay over plain HTTPS (fallback for strict networks) ===== */
+class NtfyRelay {
+  constructor(topic, onMessage, onState){
+    this.topic = topic; this.onMessage = onMessage; this.onState = onState || (()=>{});
+    this.es = null; this.ok = false; this.last = 0; this.pending = null; this.timer = null;
+  }
+  setOk(v){ if (this.ok !== v){ this.ok = v; this.onState(v); } }
+  start(){
+    const base = 'https://ntfy.sh/' + this.topic;
+    // Catch up on the most recent message, then listen live
+    fetch(base + '/json?poll=1&since=12h').then(r => r.ok ? r.text() : '').then(t => {
+      const lines = t.trim().split('\n').filter(Boolean);
+      for (const l of lines){ try{ const m = JSON.parse(l); if (m.event === 'message' && m.message) this.onMessage(m.message); }catch(_){} }
+    }).catch(()=>{});
+    try{
+      this.es = new EventSource(base + '/sse');
+      this.es.onopen = () => this.setOk(true);
+      this.es.onerror = () => this.setOk(false);
+      this.es.onmessage = ev => { try{ const m = JSON.parse(ev.data); if (m.event === 'message' && m.message) this.onMessage(m.message); }catch(_){} };
+    }catch(_){}
+  }
+  stop(){ clearTimeout(this.timer); try{ this.es && this.es.close(); }catch(_){} this.setOk(false); }
+  // ntfy limits request rates, so send at most one message every 3 s (always the latest text)
+  publish(text){
+    if (text.length > 3900) return;
+    this.pending = text;
+    if (this.timer) return;
+    const wait = Math.max(0, 3000 - (Date.now() - this.last));
+    this.timer = setTimeout(() => {
+      this.timer = null; this.last = Date.now();
+      const body = this.pending; this.pending = null;
+      fetch('https://ntfy.sh/' + this.topic, { method: 'POST', body }).then(r => this.setOk(r.ok)).catch(() => this.setOk(false));
+    }, wait);
+  }
+}
+
+/* ===== App ===== */
 (() => {
   const $ = id => document.getElementById(id);
   const ta = $('clip');
   const ALPHA = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  const PREFIX = 'liveclip-v1-';
+  const BROKERS = [
+    ['EMQX', 'wss://broker.emqx.io:8084/mqtt'],
+    ['HiveMQ', 'wss://broker.hivemq.com:8884/mqtt'],
+    ['Mosquitto', 'wss://test.mosquitto.org:8081/mqtt'],
+  ];
+  const ME = Math.random().toString(36).slice(2, 10);
 
-  let code = null, peer = null, isHost = false;
-  const conns = new Set();
-  let lastTs = 0, sendTimer = null, retryTimer = null;
+  let code = null, key = null, topicText = null, topicHello = null;
+  let relays = [];          // {name, client, ok, kind}
+  let lastTs = 0, sendTimer = null, helloTimer = null;
+  const seen = new Map();   // other device id -> last seen time
 
-  // ---------- helpers ----------
   const store = {
     get(k){ try{ return localStorage.getItem(k); }catch(_){ return null; } },
     set(k,v){ try{ localStorage.setItem(k,v); }catch(_){} },
     del(k){ try{ localStorage.removeItem(k); }catch(_){} }
   };
-  function toast(msg){
-    const t = $('toast'); t.textContent = msg; t.hidden = false;
-    clearTimeout(toast.t); toast.t = setTimeout(() => t.hidden = true, 1500);
-  }
-  function status(state, text){ $('status').dataset.s = state; $('statusText').textContent = text; }
+  function toast(msg){ const t = $('toast'); t.textContent = msg; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => t.hidden = true, 1500); }
   function setCount(){ $('count').textContent = ta.value.length.toLocaleString(); }
-  function openConns(){ return [...conns].filter(c => c.open); }
-  function updatePeers(){
-    const n = openConns().length;
-    if (n > 0){
-      status('live', 'Live');
-      $('peerInfo').textContent = n === 1 ? '1 other device connected' : `${n} other devices connected`;
-    } else {
-      $('peerInfo').textContent = 'No device connected';
-      if (peer && !peer.destroyed) status('wait', 'Waiting for other device…');
-    }
-  }
-  function newCode(){
-    const a = new Uint32Array(6); crypto.getRandomValues(a);
-    return [...a].map(n => ALPHA[n % ALPHA.length]).join('');
-  }
+  function newCode(){ const a = new Uint32Array(6); crypto.getRandomValues(a); return [...a].map(n => ALPHA[n % ALPHA.length]).join(''); }
   function cleanCode(s){ return (s || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); }
 
-  // ---------- views ----------
+  // ---- crypto: the pairing code is the password; relays only ever see encrypted text ----
+  const b64 = u8 => { let s=''; for (let i=0;i<u8.length;i+=0x8000) s += String.fromCharCode.apply(null, u8.subarray(i,i+0x8000)); return btoa(s); };
+  const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+  async function hex(s){ const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)); return [...new Uint8Array(h)].map(x=>x.toString(16).padStart(2,'0')).join(''); }
+  async function deriveKey(c){
+    const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(c), 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey({ name:'PBKDF2', salt:new TextEncoder().encode('liveclip-v2-salt'), iterations:150000, hash:'SHA-256' },
+      base, { name:'AES-GCM', length:256 }, false, ['encrypt','decrypt']);
+  }
+  async function seal(obj){
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name:'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(obj))));
+    const out = new Uint8Array(12 + ct.length); out.set(iv); out.set(ct, 12);
+    return b64(out);
+  }
+  async function open(str){
+    const k = key; if (!k) return null;
+    try{
+      const all = unb64(str);
+      const pt = await crypto.subtle.decrypt({ name:'AES-GCM', iv: all.subarray(0,12) }, k, all.subarray(12));
+      return JSON.parse(new TextDecoder().decode(pt));
+    }catch(_){ return null; }
+  }
+
+  // ---- status ----
+  function render(){
+    const up = relays.filter(r => r.ok);
+    const now = Date.now();
+    for (const [id, t] of seen) if (now - t > 70000) seen.delete(id);
+    const others = seen.size;
+    if (!code){ status('off','Not paired'); }
+    else if (!up.length){ status('err', relays.length ? 'Can’t reach any relay — retrying' : 'Connecting…'); }
+    else if (others){ status('live', 'Live'); }
+    else status('wait', 'Connected · waiting for other device');
+    $('peerInfo').textContent = others ? (others === 1 ? 'Other device connected' : others + ' other devices connected') : 'Other device not seen yet';
+    $('relays').textContent = relays.length ? 'Relays: ' + relays.map(r => (r.ok ? '● ' : '○ ') + r.name).join('   ') : '';
+    $('relays').hidden = !code;
+  }
+  function status(s, t){ $('status').dataset.s = s; $('statusText').textContent = t; }
+
+  // ---- receiving ----
+  function applyRemote(text, ts){
+    if (typeof text !== 'string' || typeof ts !== 'number' || ts <= lastTs) return;
+    lastTs = ts;
+    store.set('liveclip-ts', String(lastTs));
+    if (text === ta.value) return;
+    const focused = document.activeElement === ta;
+    const s = ta.selectionStart, e = ta.selectionEnd, old = ta.value;
+    ta.value = text;
+    if (focused){
+      const same = text.slice(0, s) === old.slice(0, s), d = text.length - old.length;
+      ta.setSelectionRange(same ? s : Math.max(0, s + d), same ? e : Math.max(0, e + d));
+    }
+    setCount(); store.set('liveclip-text', text);
+  }
+  async function onPayload(str, myKey){
+    const m = await open(str);
+    if (!m || myKey !== key || m.from === ME) return;
+    seen.set(m.from, Date.now()); render();
+    if (m.type === 'text') applyRemote(m.text, m.ts);
+    if (m.type === 'hello' && m.ts < lastTs) sendText(); // they are behind: share our newer text
+  }
+
+  // ---- sending ----
+  async function sendText(){
+    if (!key) return;
+    const payload = await seal({ type:'text', text: ta.value, ts: lastTs, from: ME });
+    relays.forEach(r => r.kind === 'mqtt' ? r.client.publish(topicText, payload, true) : r.client.publish(payload));
+  }
+  async function sendHello(){
+    if (!key) return;
+    const payload = await seal({ type:'hello', ts: lastTs, from: ME });
+    relays.forEach(r => { if (r.kind === 'mqtt') r.client.publish(topicHello, payload, false); });
+  }
+  ta.addEventListener('input', () => {
+    lastTs = Math.max(Date.now(), lastTs + 1);
+    setCount(); store.set('liveclip-text', ta.value); store.set('liveclip-ts', String(lastTs));
+    clearTimeout(sendTimer); sendTimer = setTimeout(sendText, 60);
+  });
+
+  // ---- connect ----
+  function teardown(){ relays.forEach(r => r.client.stop()); relays = []; clearInterval(helloTimer); seen.clear(); key = null; }
+  async function connect(c){
+    teardown(); code = c; render();
+    const k = await deriveKey(c);
+    const h = await hex('liveclip-topic:' + c);
+    if (code !== c) return;
+    key = k;
+    topicText = 'liveclip2/' + h.slice(0, 32) + '/text';
+    topicHello = 'liveclip2/' + h.slice(0, 32) + '/hello';
+    const myKey = k;
+    BROKERS.forEach(([name, url]) => {
+      const r = { name, kind:'mqtt', ok:false };
+      r.client = new MiniMqtt(url, (t, s) => onPayload(s, myKey), ok => { r.ok = ok; render(); if (ok){ sendHello(); } });
+      r.client.subscribe(topicText); r.client.subscribe(topicHello);
+      relays.push(r); r.client.start();
+    });
+    const n = { name:'ntfy', kind:'ntfy', ok:false };
+    n.client = new NtfyRelay('lc2' + h.slice(32, 64), s => onPayload(s, myKey), ok => { n.ok = ok; render(); });
+    relays.push(n); n.client.start();
+    helloTimer = setInterval(() => { sendHello(); render(); }, 25000);
+    render();
+  }
+
+  // ---- views ----
   function showPairing(){
     $('pairView').hidden = false;
-    ['infoView','slipView','barView'].forEach(id => $(id).hidden = true);
+    ['infoView','slipView','barView','relays'].forEach(id => $(id).hidden = true);
     status('off', 'Not paired');
   }
   function showClip(){
@@ -165,130 +364,23 @@ button.link{background:none;border:0;color:var(--muted);text-decoration:underlin
     $('codeShow').textContent = code;
     const qr = $('qr'); qr.innerHTML = '';
     if (/^https?:/.test(location.protocol) && window.QRCode){
-      const url = location.href.split('#')[0] + '#' + code;
-      new QRCode(qr, { text: url, width: 220, height: 220, correctLevel: QRCode.CorrectLevel.M });
+      new QRCode(qr, { text: location.href.split('#')[0].split('?')[0] + '#' + code, width: 220, height: 220, correctLevel: QRCode.CorrectLevel.M });
       qr.hidden = false;
       $('hint').textContent = 'Scan with your phone, or enter the code there.';
     } else qr.hidden = true;
   }
-
-  // ---------- sync ----------
-  function applyRemote(text, ts){
-    if (typeof text !== 'string' || typeof ts !== 'number' || ts <= lastTs) return false;
-    lastTs = ts;
-    if (text !== ta.value){
-      const focused = document.activeElement === ta;
-      const s = ta.selectionStart, e = ta.selectionEnd, old = ta.value;
-      ta.value = text;
-      if (focused){
-        const same = text.slice(0, s) === old.slice(0, s);
-        const d = text.length - old.length;
-        ta.setSelectionRange(same ? s : Math.max(0, s + d), same ? e : Math.max(0, e + d));
-      }
-      setCount();
-      store.set('liveclip-text', text);
-    }
-    return true;
-  }
-  function broadcast(except){
-    const msg = { type: 'text', text: ta.value, ts: lastTs };
-    openConns().forEach(c => { if (c !== except){ try{ c.send(msg); }catch(_){} } });
-  }
-  ta.addEventListener('input', () => {
-    lastTs = Math.max(Date.now(), lastTs + 1);
-    setCount();
-    store.set('liveclip-text', ta.value);
-    store.set('liveclip-ts', String(lastTs));
-    clearTimeout(sendTimer);
-    sendTimer = setTimeout(() => broadcast(null), 40);
-  });
-
-  // ---------- peer connection ----------
-  function wireConn(c){
-    conns.add(c);
-    c.on('open', () => {
-      c.send({ type: 'text', text: ta.value, ts: lastTs }); // share our latest; newest wins
-      updatePeers();
-    });
-    c.on('data', m => {
-      if (!m || m.type !== 'text') return;
-      if (applyRemote(m.text, m.ts) && isHost) broadcast(c); // host relays to other devices
-    });
-    const gone = () => {
-      conns.delete(c); updatePeers();
-      if (!isHost) scheduleRetry(); // host left: try again (we may become host)
-    };
-    c.on('close', gone);
-    c.on('error', gone);
-  }
-
-  function scheduleRetry(){
-    clearTimeout(retryTimer);
-    retryTimer = setTimeout(() => { if (code) connect(code); }, 2500);
-  }
-
-  function teardown(){
-    clearTimeout(retryTimer);
-    conns.forEach(c => { try{ c.close(); }catch(_){} });
-    conns.clear();
-    if (peer){ try{ peer.destroy(); }catch(_){} }
-    peer = null; isHost = false;
-  }
-
-  function connect(c){
-    teardown();
-    code = c;
-    const hostId = PREFIX + code;
-    status('wait', 'Connecting…');
-
-    // Try to be the host for this code. If someone already is, join them.
-    peer = new Peer(hostId);
-    peer.on('open', () => { isHost = true; updatePeers(); });
-    peer.on('connection', wireConn);
-    peer.on('disconnected', () => { if (peer && !peer.destroyed) peer.reconnect(); });
-    peer.on('error', err => {
-      if (err.type === 'unavailable-id'){
-        try{ peer.destroy(); }catch(_){}
-        joinAsGuest(hostId);
-      } else if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error'){
-        status('err', 'Can’t reach pairing server — retrying');
-        scheduleRetry();
-      } else if (err.type === 'browser-incompatible'){
-        status('err', 'This browser doesn’t support live sync');
-      } else {
-        status('err', 'Connection problem — retrying');
-        scheduleRetry();
-      }
-    });
-  }
-
-  function joinAsGuest(hostId){
-    isHost = false;
-    peer = new Peer();
-    peer.on('open', () => {
-      const c = peer.connect(hostId, { reliable: true });
-      wireConn(c);
-      // if the direct link can't be made in time, start over
-      setTimeout(() => { if (!c.open && peer && !peer.destroyed && !isHost) { status('err', 'Direct link blocked — retrying'); scheduleRetry(); } }, 12000);
-    });
-    peer.on('disconnected', () => { if (peer && !peer.destroyed) peer.reconnect(); });
-    peer.on('error', err => {
-      if (err.type === 'peer-unavailable'){ scheduleRetry(); } // host left; try to become host
-      else { status('err', 'Connection problem — retrying'); scheduleRetry(); }
-    });
-  }
-
   function startWith(c){
     c = cleanCode(c);
     if (c.length < 4){ toast('Enter the code shown on your other device'); return; }
+    if (store.get('liveclip-code') !== c){ lastTs = 0; } // new pairing: accept the other device's text
     store.set('liveclip-code', c);
-    if (location.hash.slice(1) !== c) history.replaceState(null, '', '#' + c);
+    if (location.hash.slice(1) !== c) history.replaceState(null, '', location.pathname + location.search + '#' + c);
     code = c;
     showClip();
     connect(c);
   }
 
-  // ---------- UI ----------
+  // ---- UI ----
   $('newBtn').addEventListener('click', () => startWith(newCode()));
   $('joinForm').addEventListener('submit', e => { e.preventDefault(); startWith($('codeInput').value); });
   $('unpairBtn').addEventListener('click', () => {
@@ -313,19 +405,19 @@ button.link{background:none;border:0;color:var(--muted);text-decoration:underlin
     clearBtn.classList.remove('armed'); clearBtn.textContent = 'Clear';
     ta.value = ''; ta.dispatchEvent(new Event('input')); toast('Cleared');
   });
-  // Reconnect quickly when a phone comes back from the background
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && code && openConns().length === 0) connect(code);
+    if (document.visibilityState === 'visible' && code && !relays.some(r => r.ok)) connect(code);
   });
 
-  // ---------- boot ----------
+  // ---- boot ----
+  if (!window.isSecureContext || !crypto.subtle){ status('err', 'Open this page over https'); return; }
   const saved = store.get('liveclip-text');
   if (saved){ ta.value = saved; lastTs = Number(store.get('liveclip-ts')) || 0; setCount(); }
-  if (!window.Peer){ status('err', 'Couldn’t load the sync library — check your connection'); }
   const fromHash = cleanCode(location.hash.slice(1));
   const fromStore = store.get('liveclip-code');
-  if (window.Peer && (fromHash || fromStore)) startWith(fromHash || fromStore);
+  if (fromHash || fromStore) startWith(fromHash || fromStore);
   else showPairing();
+  window.__liveclip = { MiniMqtt, NtfyRelay };
 })();
 </script>
 </body>
