@@ -63,6 +63,9 @@ button.primary{background:var(--accent);border-color:var(--accent);color:var(--a
 button.armed{border-color:var(--warn);color:var(--warn)}
 button.link{background:none;border:0;color:var(--muted);text-decoration:underline;min-height:0;padding:4px;font-weight:500;font-size:.82rem}
 .relays{font:.72rem var(--f-mono);color:var(--muted);text-align:center;margin:0}
+.relays:empty{display:none}
+#sizeInfo[data-s="warn"]{color:var(--warn)}
+#sizeInfo[data-s="err"]{color:var(--bad);font-weight:600}
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(80px + env(safe-area-inset-bottom));
   background:var(--ink);color:var(--paper);padding:9px 16px;border-radius:999px;font-weight:600;font-size:.88rem;pointer-events:none}
 [hidden]{display:none!important}
@@ -107,6 +110,7 @@ button.link{background:none;border:0;color:var(--muted);text-decoration:underlin
     <button id="selectBtn" type="button">Select all</button>
     <button id="clearBtn" type="button">Clear</button>
   </div>
+  <p class="relays" id="sizeInfo"></p>
   <p class="relays" id="relays" hidden></p>
   <div class="toast" id="toast" hidden></div>
 </div>
@@ -257,18 +261,21 @@ class NtfyRelay {
     return crypto.subtle.deriveKey({ name:'PBKDF2', salt:new TextEncoder().encode('liveclip-v2-salt'), iterations:150000, hash:'SHA-256' },
       base, { name:'AES-GCM', length:256 }, false, ['encrypt','decrypt']);
   }
+  // gzip before encrypting: prompts and AI outputs shrink to roughly a quarter
+  const pipe = async (u8, stream) => new Uint8Array(await new Response(new Blob([u8]).stream().pipeThrough(stream)).arrayBuffer());
   async function seal(obj){
     const iv = crypto.getRandomValues(new Uint8Array(12));
-    const ct = new Uint8Array(await crypto.subtle.encrypt({ name:'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(obj))));
+    const z = await pipe(new TextEncoder().encode(JSON.stringify(obj)), new CompressionStream('gzip'));
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name:'AES-GCM', iv }, key, z));
     const out = new Uint8Array(12 + ct.length); out.set(iv); out.set(ct, 12);
-    return b64(out);
+    return 'z' + b64(out);
   }
   async function open(str){
-    const k = key; if (!k) return null;
+    const k = key; if (!k || str[0] !== 'z') return null;
     try{
-      const all = unb64(str);
-      const pt = await crypto.subtle.decrypt({ name:'AES-GCM', iv: all.subarray(0,12) }, k, all.subarray(12));
-      return JSON.parse(new TextDecoder().decode(pt));
+      const all = unb64(str.slice(1));
+      const z = new Uint8Array(await crypto.subtle.decrypt({ name:'AES-GCM', iv: all.subarray(0,12) }, k, all.subarray(12)));
+      return JSON.parse(new TextDecoder().decode(await pipe(z, new DecompressionStream('gzip'))));
     }catch(_){ return null; }
   }
 
@@ -312,10 +319,33 @@ class NtfyRelay {
   }
 
   // ---- sending ----
+  // Each relay accepts a different maximum message size (measured, encrypted + compressed)
+  const MAX = { EMQX: 500e3, HiveMQ: 4e6, Mosquitto: 1e6 };
+  let sending = false, sendAgain = false;
   async function sendText(){
     if (!key) return;
-    const payload = await seal({ type:'text', text: ta.value, ts: lastTs, from: ME });
-    relays.forEach(r => r.kind === 'mqtt' ? r.client.publish(topicText, payload, true) : r.client.publish(payload));
+    if (sending){ sendAgain = true; return; }
+    sending = true;
+    try{
+      const payload = await seal({ type:'text', text: ta.value, ts: lastTs, from: ME });
+      let carried = 0;
+      relays.forEach(r => {
+        if (r.kind === 'mqtt'){
+          if (payload.length <= (MAX[r.name] || 500e3)){ r.client.publish(topicText, payload, true); if (r.ok) carried++; }
+        } else r.client.publish(payload);
+      });
+      sizeNote(payload.length, carried);
+    } finally {
+      sending = false;
+      if (sendAgain){ sendAgain = false; sendText(); }
+    }
+  }
+  function sizeNote(bytes, carried){
+    const kb = Math.round(bytes / 1024);
+    const el = $('sizeInfo');
+    if (bytes > MAX.HiveMQ){ el.textContent = `Too large to sync (${kb} KB after compression, max ~3,900 KB)`; el.dataset.s = 'err'; }
+    else if (bytes > MAX.EMQX){ el.textContent = `Large text: ${kb} KB after compression · ${carried} relay${carried === 1 ? '' : 's'} can carry it`; el.dataset.s = 'warn'; }
+    else { el.textContent = ''; el.dataset.s = ''; }
   }
   async function sendHello(){
     if (!key) return;
@@ -325,7 +355,9 @@ class NtfyRelay {
   ta.addEventListener('input', () => {
     lastTs = Math.max(Date.now(), lastTs + 1);
     setCount(); store.set('liveclip-text', ta.value); store.set('liveclip-ts', String(lastTs));
-    clearTimeout(sendTimer); sendTimer = setTimeout(sendText, 60);
+    clearTimeout(sendTimer);
+    // short delay for normal text; a bit longer for very long text so typing stays smooth
+    sendTimer = setTimeout(sendText, ta.value.length > 50000 ? 300 : 60);
   });
 
   // ---- connect ----
