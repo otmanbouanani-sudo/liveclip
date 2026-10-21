@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Live Clip</title>
+<meta name="theme-color" content="#2357e8">
+<style>
+:root{
+  --bg:#eef1f4; --paper:#ffffff; --ink:#151a22; --muted:#5f6b7a; --line:#d5dbe3;
+  --accent:#2357e8; --accent-ink:#ffffff; --live:#12a36b; --warn:#c97a12; --bad:#d13b3b;
+  --f-body:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --f-mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){:root{
+  --bg:#0e1116; --paper:#161b23; --ink:#e8edf3; --muted:#8d99a8; --line:#2a323e;
+  --accent:#6d93ff; --accent-ink:#0b1020; --live:#2fd08f; --warn:#e9a443; --bad:#ff6b6b; color-scheme:dark}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:15px}
+.app{height:100%;display:flex;flex-direction:column;gap:12px;max-width:880px;margin:0 auto;
+  padding:max(14px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(12px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left))}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+h1{font-weight:800;font-size:1.45rem;letter-spacing:-.02em;margin:0}
+h1 span{color:var(--accent)}
+.status{display:flex;align-items:center;gap:8px;font-size:.84rem;color:var(--muted)}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--muted)}
+.status[data-s="live"] .dot{background:var(--live)}
+.status[data-s="wait"] .dot{background:var(--warn)}
+.status[data-s="err"] .dot{background:var(--bad)}
+
+.card{background:var(--paper);border:1px solid var(--line);border-radius:14px}
+.pair{padding:18px;display:flex;flex-direction:column;gap:14px}
+.pair h2{margin:0;font-size:1.1rem}
+.pair p{margin:0;color:var(--muted);line-height:1.5}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+input{font:600 1.25rem var(--f-mono);letter-spacing:.2em;text-transform:uppercase;padding:12px 14px;
+  border-radius:11px;border:1px solid var(--line);background:var(--bg);color:var(--ink);flex:1;min-width:0;width:100%}
+input:focus{outline:2px solid var(--accent);outline-offset:1px}
+.or{text-align:center;color:var(--muted);font-size:.85rem}
+
+.pairinfo{display:flex;gap:16px;align-items:center;flex-wrap:wrap;padding:12px 14px}
+.code{font:700 1.6rem var(--f-mono);letter-spacing:.18em}
+.pairinfo small{display:block;color:var(--muted);font-size:.78rem}
+#qr{background:#fff;padding:6px;border-radius:8px;line-height:0}
+#qr img,#qr canvas{width:110px;height:110px}
+.pairinfo .grow{flex:1;min-width:150px}
+
+.slip{flex:1;min-height:160px;display:flex;flex-direction:column;overflow:hidden}
+.slip-head{display:flex;justify-content:space-between;padding:9px 14px;border-bottom:1px dashed var(--line);
+  font:.74rem var(--f-mono);color:var(--muted)}
+textarea{flex:1;width:100%;resize:none;border:0;outline:0;background:transparent;color:var(--ink);
+  font:15px/1.55 var(--f-mono);padding:14px}
+.slip:focus-within{border-color:var(--accent)}
+
+.bar{display:grid;grid-template-columns:1fr auto auto;gap:8px}
+button{font:600 .95rem var(--f-body);border-radius:11px;border:1px solid var(--line);background:var(--paper);
+  color:var(--ink);padding:12px 16px;cursor:pointer;min-height:48px}
+button:hover{border-color:var(--muted)}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+button.armed{border-color:var(--warn);color:var(--warn)}
+button.link{background:none;border:0;color:var(--muted);text-decoration:underline;min-height:0;padding:4px;font-weight:500;font-size:.82rem}
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(80px + env(safe-area-inset-bottom));
+  background:var(--ink);color:var(--paper);padding:9px 16px;border-radius:999px;font-weight:600;font-size:.88rem;pointer-events:none}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>Live<span>Clip</span></h1>
+    <div class="status" id="status" data-s="off"><span class="dot"></span><span id="statusText">Not paired</span></div>
+  </header>
+
+  <!-- Pairing screen -->
+  <section class="card pair" id="pairView">
+    <h2>Pair your devices</h2>
+    <p>Create a code on your computer, then scan the QR code with your phone (or type the same code on it).</p>
+    <button class="primary" id="newBtn" type="button">Create a new code</button>
+    <div class="or">or join with a code</div>
+    <form class="row" id="joinForm">
+      <input id="codeInput" maxlength="8" autocomplete="off" autocapitalize="characters" placeholder="ABC123" aria-label="Pairing code">
+      <button type="submit">Join</button>
+    </form>
+  </section>
+
+  <!-- Clipboard screen -->
+  <section class="card pairinfo" id="infoView" hidden>
+    <div id="qr" hidden></div>
+    <div class="grow">
+      <small>Pairing code</small>
+      <div class="code" id="codeShow">------</div>
+      <small id="hint">Enter this code on your other device.</small>
+    </div>
+    <button class="link" id="unpairBtn" type="button">Change code</button>
+  </section>
+
+  <section class="card slip" id="slipView" hidden>
+    <div class="slip-head"><span id="peerInfo">No device connected</span><span><b id="count">0</b> chars</span></div>
+    <textarea id="clip" spellcheck="false" autocomplete="off"
+      placeholder="Type or paste here — it appears live on your other device."></textarea>
+  </section>
+
+  <div class="bar" id="barView" hidden>
+    <button class="primary" id="copyBtn" type="button">Copy to clipboard</button>
+    <button id="selectBtn" type="button">Select all</button>
+    <button id="clearBtn" type="button">Clear</button>
+  </div>
+  <div class="toast" id="toast" hidden></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const ta = $('clip');
+  const ALPHA = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const PREFIX = 'liveclip-v1-';
+
+  let code = null, peer = null, isHost = false;
+  const conns = new Set();
+  let lastTs = 0, sendTimer = null, retryTimer = null;
+
+  // ---------- helpers ----------
+  const store = {
+    get(k){ try{ return localStorage.getItem(k); }catch(_){ return null; } },
+    set(k,v){ try{ localStorage.setItem(k,v); }catch(_){} },
+    del(k){ try{ localStorage.removeItem(k); }catch(_){} }
+  };
+  function toast(msg){
+    const t = $('toast'); t.textContent = msg; t.hidden = false;
+    clearTimeout(toast.t); toast.t = setTimeout(() => t.hidden = true, 1500);
+  }
+  function status(state, text){ $('status').dataset.s = state; $('statusText').textContent = text; }
+  function setCount(){ $('count').textContent = ta.value.length.toLocaleString(); }
+  function openConns(){ return [...conns].filter(c => c.open); }
+  function updatePeers(){
+    const n = openConns().length;
+    if (n > 0){
+      status('live', 'Live');
+      $('peerInfo').textContent = n === 1 ? '1 other device connected' : `${n} other devices connected`;
+    } else {
+      $('peerInfo').textContent = 'No device connected';
+      if (peer && !peer.destroyed) status('wait', 'Waiting for other device…');
+    }
+  }
+  function newCode(){
+    const a = new Uint32Array(6); crypto.getRandomValues(a);
+    return [...a].map(n => ALPHA[n % ALPHA.length]).join('');
+  }
+  function cleanCode(s){ return (s || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); }
+
+  // ---------- views ----------
+  function showPairing(){
+    $('pairView').hidden = false;
+    ['infoView','slipView','barView'].forEach(id => $(id).hidden = true);
+    status('off', 'Not paired');
+  }
+  function showClip(){
+    $('pairView').hidden = true;
+    ['infoView','slipView','barView'].forEach(id => $(id).hidden = false);
+    $('codeShow').textContent = code;
+    const qr = $('qr'); qr.innerHTML = '';
+    if (/^https?:/.test(location.protocol) && window.QRCode){
+      const url = location.href.split('#')[0] + '#' + code;
+      new QRCode(qr, { text: url, width: 220, height: 220, correctLevel: QRCode.CorrectLevel.M });
+      qr.hidden = false;
+      $('hint').textContent = 'Scan with your phone, or enter the code there.';
+    } else qr.hidden = true;
+  }
+
+  // ---------- sync ----------
+  function applyRemote(text, ts){
+    if (typeof text !== 'string' || typeof ts !== 'number' || ts <= lastTs) return false;
+    lastTs = ts;
+    if (text !== ta.value){
+      const focused = document.activeElement === ta;
+      const s = ta.selectionStart, e = ta.selectionEnd, old = ta.value;
+      ta.value = text;
+      if (focused){
+        const same = text.slice(0, s) === old.slice(0, s);
+        const d = text.length - old.length;
+        ta.setSelectionRange(same ? s : Math.max(0, s + d), same ? e : Math.max(0, e + d));
+      }
+      setCount();
+      store.set('liveclip-text', text);
+    }
+    return true;
+  }
+  function broadcast(except){
+    const msg = { type: 'text', text: ta.value, ts: lastTs };
+    openConns().forEach(c => { if (c !== except){ try{ c.send(msg); }catch(_){} } });
+  }
+  ta.addEventListener('input', () => {
+    lastTs = Math.max(Date.now(), lastTs + 1);
+    setCount();
+    store.set('liveclip-text', ta.value);
+    store.set('liveclip-ts', String(lastTs));
+    clearTimeout(sendTimer);
+    sendTimer = setTimeout(() => broadcast(null), 40);
+  });
+
+  // ---------- peer connection ----------
+  function wireConn(c){
+    conns.add(c);
+    c.on('open', () => {
+      c.send({ type: 'text', text: ta.value, ts: lastTs }); // share our latest; newest wins
+      updatePeers();
+    });
+    c.on('data', m => {
+      if (!m || m.type !== 'text') return;
+      if (applyRemote(m.text, m.ts) && isHost) broadcast(c); // host relays to other devices
+    });
+    const gone = () => {
+      conns.delete(c); updatePeers();
+      if (!isHost) scheduleRetry(); // host left: try again (we may become host)
+    };
+    c.on('close', gone);
+    c.on('error', gone);
+  }
+
+  function scheduleRetry(){
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(() => { if (code) connect(code); }, 2500);
+  }
+
+  function teardown(){
+    clearTimeout(retryTimer);
+    conns.forEach(c => { try{ c.close(); }catch(_){} });
+    conns.clear();
+    if (peer){ try{ peer.destroy(); }catch(_){} }
+    peer = null; isHost = false;
+  }
+
+  function connect(c){
+    teardown();
+    code = c;
+    const hostId = PREFIX + code;
+    status('wait', 'Connecting…');
+
+    // Try to be the host for this code. If someone already is, join them.
+    peer = new Peer(hostId);
+    peer.on('open', () => { isHost = true; updatePeers(); });
+    peer.on('connection', wireConn);
+    peer.on('disconnected', () => { if (peer && !peer.destroyed) peer.reconnect(); });
+    peer.on('error', err => {
+      if (err.type === 'unavailable-id'){
+        try{ peer.destroy(); }catch(_){}
+        joinAsGuest(hostId);
+      } else if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error'){
+        status('err', 'Can’t reach pairing server — retrying');
+        scheduleRetry();
+      } else if (err.type === 'browser-incompatible'){
+        status('err', 'This browser doesn’t support live sync');
+      } else {
+        status('err', 'Connection problem — retrying');
+        scheduleRetry();
+      }
+    });
+  }
+
+  function joinAsGuest(hostId){
+    isHost = false;
+    peer = new Peer();
+    peer.on('open', () => {
+      const c = peer.connect(hostId, { reliable: true });
+      wireConn(c);
+      // if the direct link can't be made in time, start over
+      setTimeout(() => { if (!c.open && peer && !peer.destroyed && !isHost) { status('err', 'Direct link blocked — retrying'); scheduleRetry(); } }, 12000);
+    });
+    peer.on('disconnected', () => { if (peer && !peer.destroyed) peer.reconnect(); });
+    peer.on('error', err => {
+      if (err.type === 'peer-unavailable'){ scheduleRetry(); } // host left; try to become host
+      else { status('err', 'Connection problem — retrying'); scheduleRetry(); }
+    });
+  }
+
+  function startWith(c){
+    c = cleanCode(c);
+    if (c.length < 4){ toast('Enter the code shown on your other device'); return; }
+    store.set('liveclip-code', c);
+    if (location.hash.slice(1) !== c) history.replaceState(null, '', '#' + c);
+    showClip();
+    connect(c);
+  }
+
+  // ---------- UI ----------
+  $('newBtn').addEventListener('click', () => startWith(newCode()));
+  $('joinForm').addEventListener('submit', e => { e.preventDefault(); startWith($('codeInput').value); });
+  $('unpairBtn').addEventListener('click', () => {
+    teardown(); code = null; store.del('liveclip-code');
+    history.replaceState(null, '', location.pathname + location.search);
+    showPairing();
+  });
+  $('copyBtn').addEventListener('click', () => {
+    if (!ta.value){ toast('Nothing to copy'); return; }
+    const fallback = () => { ta.focus(); ta.select(); try{ document.execCommand('copy'); toast('Copied'); }catch(_){ toast('Selected — use your Copy menu'); } };
+    if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(ta.value).then(() => toast('Copied'), fallback);
+    else fallback();
+  });
+  $('selectBtn').addEventListener('click', () => { ta.focus(); ta.select(); });
+  const clearBtn = $('clearBtn');
+  clearBtn.addEventListener('click', () => {
+    if (!clearBtn.classList.contains('armed')){
+      clearBtn.classList.add('armed'); clearBtn.textContent = 'Tap to confirm';
+      clearTimeout(clearBtn.t); clearBtn.t = setTimeout(() => { clearBtn.classList.remove('armed'); clearBtn.textContent = 'Clear'; }, 2500);
+      return;
+    }
+    clearBtn.classList.remove('armed'); clearBtn.textContent = 'Clear';
+    ta.value = ''; ta.dispatchEvent(new Event('input')); toast('Cleared');
+  });
+  // Reconnect quickly when a phone comes back from the background
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && code && openConns().length === 0) connect(code);
+  });
+
+  // ---------- boot ----------
+  const saved = store.get('liveclip-text');
+  if (saved){ ta.value = saved; lastTs = Number(store.get('liveclip-ts')) || 0; setCount(); }
+  if (!window.Peer){ status('err', 'Couldn’t load the sync library — check your connection'); }
+  const fromHash = cleanCode(location.hash.slice(1));
+  const fromStore = store.get('liveclip-code');
+  if (window.Peer && (fromHash || fromStore)) startWith(fromHash || fromStore);
+  else showPairing();
+})();
+</script>
+</body>
+</html>
